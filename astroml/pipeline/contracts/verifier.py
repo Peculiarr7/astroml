@@ -17,6 +17,20 @@ _AnyContract = SchemaContract | QualityContract | SemanticContract
 _AnyResult = SchemaValidationResult | QualityValidationResult | SemanticValidationResult
 
 
+class MissingContractError(KeyError):
+    """Raised in strict mode when a requested contract name is not registered.
+
+    Without strict mode, `ContractVerifier.verify` silently skips an
+    unknown contract name (logging a warning) and simply excludes it from
+    `total_contracts`/`passed_contracts`/`failed_contracts`. If every
+    contract in a stage's name list is misspelled or was removed without
+    updating the pipeline config, `verify` returns `passed=True` with
+    `total_contracts=0`: a CI data-contract gate configured this way
+    silently stops validating anything instead of failing the build,
+    which is exactly the failure mode "CI validation" should catch.
+    """
+
+
 @dataclass
 class ContractBreach:
     """Record of a single contract breach.
@@ -135,6 +149,8 @@ class ContractVerifier:
         self,
         df: pd.DataFrame,
         contract_names: list[str] | None = None,
+        *,
+        strict: bool = False,
     ) -> VerificationResult:
         """Run verification on specified (or all) contracts.
 
@@ -142,9 +158,20 @@ class ContractVerifier:
             df: DataFrame to validate.
             contract_names: Optional list of contract names to run.
                 If None, runs all registered contracts.
+            strict: If True, raise MissingContractError immediately when
+                any name in `contract_names` is not registered, instead of
+                logging a warning and silently excluding it. Defaults to
+                False to preserve existing callers' behavior; a CI
+                validation entry point should pass `strict=True` so a
+                misconfigured (misspelled or stale) contract name fails
+                the build loudly rather than quietly validating nothing.
 
         Returns:
             VerificationResult aggregating all contract results.
+
+        Raises:
+            MissingContractError: If `strict` is True and `contract_names`
+                includes a name not registered on this verifier.
         """
         names_to_run = contract_names or list(self.contracts.keys())
         results: list[ContractResult] = []
@@ -152,6 +179,11 @@ class ContractVerifier:
         for name in names_to_run:
             contract = self.contracts.get(name)
             if contract is None:
+                if strict:
+                    raise MissingContractError(
+                        f"Contract '{name}' is not registered on this verifier "
+                        f"(known contracts: {sorted(self.contracts.keys())})"
+                    )
                 logger.warning("Contract '%s' not found, skipping", name)
                 continue
 
@@ -196,6 +228,8 @@ class ContractVerifier:
         self,
         df: pd.DataFrame,
         pipeline_stages: dict[str, list[str]],
+        *,
+        strict: bool = False,
     ) -> PipelineVerificationResult:
         """Verify contracts at each pipeline stage.
 
@@ -203,14 +237,20 @@ class ContractVerifier:
             df: DataFrame to validate (same df verified at each stage).
             pipeline_stages: Dict mapping stage names to lists of contract names
                 to verify at that stage.
+            strict: Forwarded to `verify` for every stage; see its
+                docstring. Recommended for CI validation entry points.
 
         Returns:
             PipelineVerificationResult with per-stage results.
+
+        Raises:
+            MissingContractError: If `strict` is True and any stage names
+                a contract not registered on this verifier.
         """
         stage_results: list[PipelineStageResult] = []
 
         for stage_name, contract_names in pipeline_stages.items():
-            verification = self.verify(df, contract_names=contract_names)
+            verification = self.verify(df, contract_names=contract_names, strict=strict)
             stage_results.append(
                 PipelineStageResult(
                     stage_name=stage_name,

@@ -18,4 +18,4 @@ Dependencies:
 
 from astroml.ingestion.horizon_stream import HorizonStreamError, HorizonStreamingClient
 
-__all__ = ["HorizonStreamError", "HorizonStreamingClient"]
+__all__ = ["HorizonStreamingClient", "HorizonStreamError"]

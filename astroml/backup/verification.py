@@ -49,8 +49,14 @@ class BackupVerifier:
                 )
                 return False
 
-            # Additional verification based on file type
-            if backup_file.suffix == ".gz":
+            # Additional verification based on file type. An encrypted
+            # backup's on-disk bytes are ciphertext, not gzip/tar content,
+            # so opening it with gzip/tarfile here would only ever fail;
+            # the checksum check above is this backup's integrity check
+            # (it still detects corruption or tampering of the ciphertext).
+            if backup_file.name.endswith(".enc"):
+                pass
+            elif backup_file.suffix == ".gz":
                 if not self._verify_gzip_integrity(backup_file):
                     return False
             elif backup_file.suffixes == [".tar", ".gz"]:

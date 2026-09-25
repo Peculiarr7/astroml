@@ -220,11 +220,11 @@ class HorizonStreamingClient:
         paging_token = tx.get("paging_token")
         if paging_token is not None:
             token = str(paging_token)
-            self._cursor = token
             if self._dedupe and self._already_delivered(token):
                 self._duplicates_skipped += 1
                 self._logger.debug("Horizon stream: skipping replayed paging_token %s", token)
                 return
+            self._advance_cursor(token)
             self._remember(token)
 
         result = on_transaction(tx)
@@ -241,6 +241,43 @@ class HorizonStreamingClient:
         self._seen.move_to_end(token)
         while len(self._seen) > self._dedupe_capacity:
             self._seen.popitem(last=False)
+
+    def _advance_cursor(self, paging_token: str) -> None:
+        """Move the resume cursor forward to `paging_token`.
+
+        Horizon paging tokens are monotonically increasing per stream (they
+        encode ledger/tx/op ordering), and the cursor is used verbatim as
+        the resume point on reconnect. A token that does not advance the
+        cursor (or, worse, moves it backward) is inconsistent with a single
+        well-behaved stream and, if applied blindly, would make a
+        reconnect replay transactions already delivered to `on_transaction`
+        or, if the two happen to compare unequal as strings while equal in
+        value, loop forever on the same page. Both the current and
+        candidate token are compared numerically when possible so this
+        does not misfire on differing zero-padding; a token that fails to
+        parse as an integer is treated as opaque and, conservatively,
+        rejected rather than assumed safe to adopt.
+        """
+        try:
+            candidate = int(paging_token)
+        except (TypeError, ValueError):
+            self._logger.warning("Ignoring non-numeric Horizon paging_token: %r", paging_token)
+            return
+
+        try:
+            current = int(self._cursor)
+        except (TypeError, ValueError):
+            current = None
+
+        if current is not None and candidate <= current:
+            self._logger.warning(
+                "Ignoring non-advancing Horizon paging_token: %r (current cursor %r)",
+                paging_token,
+                self._cursor,
+            )
+            return
+
+        self._cursor = paging_token
 
     def _request_path(self) -> str:
         query = urlencode({"cursor": self._cursor, "stream": "true"})
