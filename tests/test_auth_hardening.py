@@ -280,3 +280,27 @@ class TestPublicRateLimitMiddleware:
         for _ in range(10):
             response = await middleware.dispatch(request, call_next)
             assert response.status_code == 200
+
+
+class TestMiddlewareStackBuilds:
+    def test_starlette_can_construct_and_run_both(self):
+        """Regression: Starlette builds the stack lazily, on the first request,
+        as ``cls(app, **options)``. A middleware it cannot construct therefore
+        surfaces as a 500 on every route rather than an import or startup error,
+        so only an end-to-end request catches it. Mirrors the ``add_middleware``
+        calls in ``api/app.py``.
+        """
+        from fastapi.testclient import TestClient
+        from starlette.applications import Starlette
+        from starlette.responses import PlainTextResponse
+        from starlette.routing import Route
+
+        app = Starlette(routes=[Route("/probe", lambda r: PlainTextResponse("ok"))])
+        app.add_middleware(SecurityHeadersMiddleware)
+        app.add_middleware(PublicRateLimitMiddleware, requests_per_minute=30, burst_size=10)
+
+        response = TestClient(app).get("/probe")
+
+        assert response.status_code == 200
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+        assert response.headers["X-Frame-Options"] == "DENY"
