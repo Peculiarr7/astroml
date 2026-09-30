@@ -317,6 +317,7 @@ def run_quickstart() -> int:
     logger.info("AstroML Quick Start: Ingestion → Graph → Train Pipeline")
     logger.info("=" * 80)
 
+    session = None
     try:
         # Set random seeds
         set_random_seeds(QuickStartConfig.RANDOM_SEED)
@@ -367,7 +368,8 @@ def run_quickstart() -> int:
         logger.error(f"Quick start failed: {e}", exc_info=True)
         return 1
     finally:
-        session.close()
+        if session is not None:
+            session.close()
 
 
 if __name__ == "__main__":

@@ -9,11 +9,14 @@ import json
 import logging
 import os
 import subprocess
+import tarfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any
+
+from .encryption import encrypt_backup_file
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +79,7 @@ class BackupMetadata:
     storage_backend: StorageBackend
     is_verified: bool = False
     description: str | None = None
+    is_encrypted: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -88,6 +92,7 @@ class BackupMetadata:
             "storage_backend": self.storage_backend.value,
             "is_verified": self.is_verified,
             "description": self.description,
+            "is_encrypted": self.is_encrypted,
         }
 
 
@@ -178,6 +183,13 @@ class BackupService:
             else:
                 raise ValueError(f"Unsupported database URL format: {db_url}")
 
+            # Encrypt at rest (issue #965): the gzip step above is
+            # compression only, not confidentiality. This dump can contain
+            # PII and credentials embedded in seed/config data, so the
+            # plaintext .sql.gz is never the file that gets persisted,
+            # uploaded, or checksummed below.
+            backup_file = encrypt_backup_file(backup_file)
+
             # Calculate checksum
             checksum = self._calculate_checksum(backup_file)
             size_bytes = backup_file.stat().st_size
@@ -193,6 +205,7 @@ class BackupService:
                 storage_backend=StorageBackend.LOCAL,
                 is_verified=False,
                 description=description,
+                is_encrypted=True,
             )
 
             self._save_metadata(metadata)
@@ -241,11 +254,13 @@ class BackupService:
             with tarfile.open(backup_file, "w:gz") as tar:
                 pass
         else:
-            import tarfile
-
             with tarfile.open(backup_file, "w:gz") as tar:
                 for item in artifacts_dir.iterdir():
                     tar.add(item, arcname=item.name)
+
+        # Encrypt at rest (issue #965): model artifacts can embed
+        # proprietary weights or, via training config, credentials.
+        backup_file = encrypt_backup_file(backup_file)
 
         # Calculate checksum
         checksum = self._calculate_checksum(backup_file)
@@ -262,6 +277,7 @@ class BackupService:
             storage_backend=StorageBackend.LOCAL,
             is_verified=False,
             description=description,
+            is_encrypted=True,
         )
 
         self._save_metadata(metadata)
@@ -312,6 +328,7 @@ class BackupService:
                     storage_backend=StorageBackend(data["storage_backend"]),
                     is_verified=data.get("is_verified", False),
                     description=data.get("description"),
+                    is_encrypted=data.get("is_encrypted", False),
                 )
 
                 if backup_type is None or metadata.backup_type == backup_type:
