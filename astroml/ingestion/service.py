@@ -38,7 +38,9 @@ Test coverage: ``tests/test_ingestion_service_streaming.py``,
 from __future__ import annotations
 
 import gc
+import json
 import logging
+import os
 from collections.abc import Callable, Generator, Iterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -53,6 +55,63 @@ from .batch_metrics import BatchMetricsRecorder
 from .state import StateStore
 
 logger = logging.getLogger("astroml.ingestion.service")
+
+
+class BackfillCheckpointManager:
+    """Manages checkpoint persistence for chunked backfill operations.
+
+    Stores the last successfully completed chunk position to enable
+    resuming from that point on restart. The checkpoint file is written
+    atomically to avoid corruption on crash.
+    """
+
+    def __init__(self, checkpoint_path: str | None = None):
+        """Initialize the checkpoint manager.
+
+        Args:
+            checkpoint_path: Path to the checkpoint file. If None, uses
+                default path in .astroml_state directory.
+        """
+        if checkpoint_path is None:
+            state_dir = os.path.join(os.getcwd(), ".astroml_state")
+            os.makedirs(state_dir, exist_ok=True)
+            checkpoint_path = os.path.join(state_dir, "backfill_checkpoint.json")
+        self.checkpoint_path = checkpoint_path
+
+    def save(self, last_ledger: int) -> None:
+        """Save checkpoint position.
+
+        Args:
+            last_ledger: The last ledger successfully processed.
+        """
+        checkpoint_data = {
+            "last_ledger": last_ledger,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        tmp_path = f"{self.checkpoint_path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(checkpoint_data, f, indent=2)
+        os.replace(tmp_path, self.checkpoint_path)
+
+    def load(self) -> int | None:
+        """Load the last checkpoint position.
+
+        Returns:
+            The last ledger processed, or None if no checkpoint exists.
+        """
+        if not os.path.exists(self.checkpoint_path):
+            return None
+        try:
+            with open(self.checkpoint_path, encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("last_ledger")
+        except (OSError, json.JSONDecodeError, KeyError):
+            return None
+
+    def clear(self) -> None:
+        """Remove the checkpoint file."""
+        if os.path.exists(self.checkpoint_path):
+            os.remove(self.checkpoint_path)
 
 
 @dataclass
@@ -478,6 +537,8 @@ class IngestionService(Ingestor):
         fetch_fn: Callable[[int], object] | None = None,
         process_fn: Callable[[int, object], None] | None = None,
         batch_size: int = 100,
+        resume_from_checkpoint: bool = False,
+        checkpoint_path: str | None = None,
     ) -> Generator[dict[str, Any], None, None]:
         """Memory-efficient backfill for very large ledger ranges — issue #766.
 
@@ -492,6 +553,12 @@ class IngestionService(Ingestor):
         chunks. Peak RSS is therefore proportional to ``chunk_size`` instead
         of the full range length.
 
+        Checkpoint support: When ``resume_from_checkpoint=True``, the method
+        saves the last successfully completed chunk position to a checkpoint
+        file. On restart, it resumes from that position rather than from
+        ``start_ledger``. This enables resuming large backfills after crashes
+        or interruptions without reprocessing already-completed chunks.
+
         Yields one summary ``dict`` per chunk:
 
         .. code-block:: python
@@ -505,13 +572,19 @@ class IngestionService(Ingestor):
             }
 
         Args:
-            start_ledger: First ledger to process (inclusive).
+            start_ledger: First ledger to process (inclusive). If
+                ``resume_from_checkpoint=True`` and a checkpoint exists,
+                this is overridden by the checkpoint position.
             end_ledger: Last ledger to process (inclusive).
             chunk_size: Number of ledgers per memory-bounded batch. Default 10 000.
             fetch_fn: Forwarded to :meth:`ingest_stream`.
             process_fn: Forwarded to :meth:`ingest_stream`.
             batch_size: State-flush cadence inside each chunk, forwarded to
                 :meth:`ingest_stream`.
+            resume_from_checkpoint: If True, resume from the last checkpoint
+                instead of starting from ``start_ledger``. Defaults to False.
+            checkpoint_path: Optional path to the checkpoint file. If None,
+                uses ``.astroml_state/backfill_checkpoint.json``.
 
         Yields one summary ``dict`` per chunk, where ``errors`` counts the
         chunks that failed. A failed chunk is also reported through
@@ -523,7 +596,29 @@ class IngestionService(Ingestor):
         if chunk_size < 1:
             raise ValueError("chunk_size must be >= 1")
 
-        current = start_ledger
+        checkpoint_mgr = None
+        if resume_from_checkpoint:
+            checkpoint_mgr = BackfillCheckpointManager(checkpoint_path)
+            last_checkpoint = checkpoint_mgr.load()
+            if last_checkpoint is not None:
+                if last_checkpoint >= end_ledger:
+                    logger.info(
+                        "Checkpoint at ledger %d already at or beyond end_ledger %d, nothing to do",
+                        last_checkpoint,
+                        end_ledger,
+                    )
+                    return
+                current = last_checkpoint + 1
+                logger.info(
+                    "Resuming from checkpoint: ledger %d (target: %d)",
+                    current,
+                    end_ledger,
+                )
+            else:
+                logger.info("No checkpoint found, starting from ledger %d", start_ledger)
+                current = start_ledger
+        else:
+            current = start_ledger
         while current <= end_ledger:
             chunk_end = min(current + chunk_size - 1, end_ledger)
             n_processed = 0
@@ -564,11 +659,21 @@ class IngestionService(Ingestor):
                 "errors": n_errors,
             }
 
+            # Save checkpoint after successful chunk completion
+            if checkpoint_mgr is not None and n_errors == 0:
+                checkpoint_mgr.save(chunk_end)
+                logger.debug("Checkpoint saved at ledger %d", chunk_end)
+
             # Release per-chunk temporaries and compact the heap before the
             # next chunk's fetch allocations begin.  gc.collect() is a no-op
             # when the GC would have run anyway, so the overhead is negligible.
             gc.collect()
             current = chunk_end + 1
+
+        # Clear checkpoint on successful completion
+        if checkpoint_mgr is not None:
+            checkpoint_mgr.clear()
+            logger.info("Backfill completed, checkpoint cleared")
 
     def get_status(self) -> Dict[str, Any]:
         """Get current status of the ingestor (issue #573).
