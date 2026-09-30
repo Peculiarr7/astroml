@@ -1,3 +1,4 @@
+from astroml.utils.exceptions import AstroMLError
 """Ingestion service for processing Stellar network ledgers.
 
 This module provides the core ingestion service for processing Stellar ledger data
@@ -11,6 +12,28 @@ Key components:
 Dependencies:
 - StateStore: Persistent state management
 - observability.metrics: Job tracking metrics
+
+Intended use (issue #969):
+- Backfilling or incrementally ingesting a range of Stellar ledgers via
+  ``ingest``/``ingest_stream``/``ingest_backfill_chunked``, and catching up
+  to the network head via ``ingest_incremental``.
+- ``fetch_fn``/``process_fn`` are supplied by the caller; this module owns
+  ordering, idempotency (skip-if-already-processed), state persistence, and
+  batching — not how a ledger is fetched or what "processing" it means.
+
+Limitations:
+- No built-in retry/backoff for a failing ``fetch_fn``/``process_fn``: an
+  exception is logged and aborts the current ``ingest``/``ingest_stream``
+  call (see ``ingest_stream``). Callers that need resilience to transient
+  fetch/process failures must implement retries in their own callbacks.
+- Idempotency relies on ``process_fn`` itself tolerating being re-invoked
+  for the same ledger id — this module only prevents *re-attempting* a
+  ledger already recorded as processed; it does not undo partial side
+  effects from an attempt that failed midway.
+- Not safe for concurrent ``ingest*`` calls sharing the same ``StateStore``.
+
+Test coverage: ``tests/test_ingestion_service_streaming.py``,
+``tests/test_backfill_chunked.py``, ``tests/ingestion/test_incremental_ingestion.py``.
 """
 
 from __future__ import annotations
@@ -53,7 +76,7 @@ class IngestionResult(BaseIngestionResult):
     end_time: datetime
     errors: List[str] = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> Any:
         if self.errors is None:
             self.errors = []
 
@@ -145,7 +168,7 @@ class IngestionService(Ingestor):
                     processed.append(ledger_id)
                 else:
                     skipped.append(ledger_id)
-        except Exception as e:
+        except AstroMLError as e:
             errors.append(str(e))
             logger.error(f"Ingestion error: {e}")
             self._notify_failure(e, attempted, processed)
@@ -233,6 +256,22 @@ class IngestionService(Ingestor):
         an outer ``ingest_backfill_chunked`` chunk loop), it's inherited
         as-is; otherwise a fresh one is generated for this run and scoped to
         the lifetime of the generator via :class:`~astroml.utils.logging.CorrelationId`.
+
+        Args:
+            start_ledger: First ledger to process (inclusive). If None, resumes
+                from ``last_processed_ledger + 1``; yields nothing on a cold
+                state store.
+            end_ledger: Last ledger to process (inclusive). If None, only
+                ``start_ledger`` is processed.
+            fetch_fn: Fetches a ledger's payload; defaults to an identity payload.
+            process_fn: Handles a fetched ledger; defaults to a no-op.
+            batch_size: Progress-logging and state-flush granularity; must be
+                ``>= 1``.
+
+        Yields:
+            ``(ledger_id, LedgerOutcome)`` per ledger, with a status of
+            ``"processed"`` or ``"skipped"``. An exception from ``fetch_fn`` or
+            ``process_fn`` is logged and re-raised, aborting the generator.
         """
         inherited_correlation_id = get_correlation_id()
         with CorrelationId(inherited_correlation_id):
@@ -474,12 +513,48 @@ class IngestionService(Ingestor):
             process_fn: Forwarded to :meth:`ingest_stream`.
             batch_size: State-flush cadence inside each chunk, forwarded to
                 :meth:`ingest_stream`.
+
+        Yields one summary ``dict`` per chunk, where ``errors`` counts the
+        chunks that failed. A failed chunk is also reported through
+        ``self.notifier`` (e.g. ``SlackIntegration(config).send_webhook``),
+        matching :meth:`ingest` — see issue #993.
+
+        Correlation (issue #957): each chunk delegates to :meth:`ingest_stream`,
+        which mints a fresh correlation id whenever none is already set on entry.
+        Without a shared scope around the whole chunk loop, that means every
+        chunk of one backfill run got a *different* request_id in the logs,
+        defeating the point of #944/#950's tracing for exactly the run most in
+        need of it: a multi-million-ledger backfill spanning many chunks. This
+        method now establishes one correlation id (inherited from the caller if
+        already set, otherwise freshly generated) before the loop starts, so
+        every chunk's logs carry the same ``request_id``.
         """
         if end_ledger < start_ledger:
             raise ValueError("end_ledger must be >= start_ledger")
         if chunk_size < 1:
             raise ValueError("chunk_size must be >= 1")
 
+        inherited_correlation_id = get_correlation_id()
+        with CorrelationId(inherited_correlation_id):
+            yield from self._ingest_backfill_chunked_impl(
+                start_ledger=start_ledger,
+                end_ledger=end_ledger,
+                chunk_size=chunk_size,
+                fetch_fn=fetch_fn,
+                process_fn=process_fn,
+                batch_size=batch_size,
+            )
+
+    def _ingest_backfill_chunked_impl(
+        self,
+        start_ledger: int,
+        end_ledger: int,
+        chunk_size: int,
+        fetch_fn: Callable[[int], object] | None,
+        process_fn: Callable[[int, object], None] | None,
+        batch_size: int,
+    ) -> Generator[dict[str, Any], None, None]:
+        """Body of :meth:`ingest_backfill_chunked`, run inside its correlation-id scope."""
         current = start_ledger
         while current <= end_ledger:
             chunk_end = min(current + chunk_size - 1, end_ledger)
@@ -507,6 +582,11 @@ class IngestionService(Ingestor):
                     exc,
                 )
                 n_errors += 1
+                # A chunked backfill swallows the per-chunk exception and keeps
+                # going, so without this the operator gets no alert at all: a
+                # backfill where every chunk fails looks exactly like a
+                # successful one from the notifier's point of view (issue #993).
+                self._notify_failure(exc, [], [])
 
             yield {
                 "chunk_start": current,
