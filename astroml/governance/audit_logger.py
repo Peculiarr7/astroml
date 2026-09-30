@@ -65,7 +65,7 @@ class AuditEventType(Enum):
     SECURITY_INCIDENT = auto()
 
 
-@dataclass
+@dataclass(frozen=True)
 class AuditEvent:
     """An immutable audit event record.
 
@@ -355,7 +355,8 @@ class ModelAuditLogger:
             def train_model(model_id: str, data_path: str) -> dict:
                 return {"epochs": 10, "loss": 0.05}
         """
-        def decorator(func) -> Any:
+
+        def decorator(func):
             @wraps(func)
             def wrapper(*args, **kwargs) -> Any:
                 start = time.monotonic()
@@ -397,6 +398,7 @@ class ModelAuditLogger:
                     raise
 
             return wrapper
+
         return decorator
 
     def query(
