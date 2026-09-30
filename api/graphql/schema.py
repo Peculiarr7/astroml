@@ -17,7 +17,6 @@ from api.graphql.types import (
     AccountConnection,
     CreateAccountInput,
     CreateFraudAlertInput,
-    FraudAlert,
     FraudAlertConnection,
     MutationResult,
     PageInfo,
@@ -27,6 +26,7 @@ from api.graphql.types import (
 )
 from api.graphql.types import ApiKey as GApiKey
 from api.graphql.types import AuditLog as GAuditLog
+from api.graphql.types import FraudAlert as GFraudAlert
 from api.graphql.types import LoyaltyPoints as GLoyaltyPoints
 from api.graphql.types import Mentee as GMentee
 from api.graphql.types import Mentor as GMentor
@@ -203,7 +203,7 @@ class Query:
 
         return FraudAlertConnection(
             edges=[
-                FraudAlert(
+                GFraudAlert(
                     id=strawberry.ID(str(a.id)),
                     account_id=a.account_id,
                     pattern=a.pattern,
@@ -547,7 +547,7 @@ class Subscription:
                 await asyncio.sleep(0.1)
 
     @strawberry.subscription
-    async def fraud_alert_created(self) -> FraudAlert:
+    async def fraud_alert_created(self) -> GFraudAlert:
         """Subscribe to new fraud alerts."""
         import asyncio
 
@@ -556,7 +556,7 @@ class Subscription:
         while True:
             try:
                 alert_data = await fraud_alert_queue.get()
-                yield FraudAlert(
+                yield GFraudAlert(
                     id=strawberry.ID(str(alert_data.get("id", 0))),
                     account_id=alert_data.get("account_id", ""),
                     pattern=alert_data.get("pattern"),
