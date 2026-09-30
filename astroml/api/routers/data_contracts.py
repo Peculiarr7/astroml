@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from astroml.pipeline.contracts.quality_contract import QualityContract
 from astroml.pipeline.contracts.schema_contract import SchemaContract
 from astroml.pipeline.contracts.semantic_contract import SemanticContract
-from astroml.pipeline.contracts.verifier import ContractVerifier
+from astroml.pipeline.contracts.verifier import ContractVerifier, MissingContractError
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +114,12 @@ class PipelineVerifyRequest(BaseModel):
 
     data: list[dict[str, Any]]
     stages: dict[str, PipelineStageSpec]
+    strict: bool = False
+    """If True, a stage referencing an unregistered contract name returns
+    HTTP 422 instead of silently verifying nothing for that name. A CI
+    caller using this endpoint as a build gate should set this to True: a
+    misspelled or stale contract name would otherwise make the gate report
+    `passed: true` for a stage that validated zero contracts."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -246,7 +252,10 @@ async def verify_pipeline(body: PipelineVerifyRequest) -> PipelineVerifyResponse
     for stage_name, stage_spec in body.stages.items():
         pipeline_stages[stage_name] = stage_spec.contracts
 
-    result = _verifier.verify_pipeline(df, pipeline_stages)
+    try:
+        result = _verifier.verify_pipeline(df, pipeline_stages, strict=body.strict)
+    except MissingContractError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
     stages_dict: dict[str, dict[str, Any]] = {}
     for stage in result.stages:

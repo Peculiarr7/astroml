@@ -11,6 +11,7 @@ import subprocess
 import tarfile
 from pathlib import Path
 
+from .encryption import decrypt_backup_file
 from .service import BackupConfig, BackupType
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,11 @@ class RestoreService:
             return False
 
         logger.info(f"Restoring database from backup: {backup_id}")
+
+        plaintext_file: Path | None = None
+        if data.get("is_encrypted"):
+            plaintext_file = decrypt_backup_file(backup_file)
+            backup_file = plaintext_file
 
         try:
             # Extract database connection info
@@ -159,6 +165,12 @@ class RestoreService:
         except AstroMLError as e:
             logger.error(f"Database restore failed: {e}")
             return False
+        finally:
+            # The decrypted copy is transient: it must not outlive this
+            # restore attempt regardless of outcome, or the encryption
+            # this module exists to provide is undone by a leftover file.
+            if plaintext_file is not None:
+                plaintext_file.unlink(missing_ok=True)
 
     def restore_model_artifacts(self, backup_id: str, target_dir: str | None = None) -> bool:
         """Restore model artifacts from a backup.
@@ -199,6 +211,11 @@ class RestoreService:
 
         logger.info(f"Restoring model artifacts from backup: {backup_id}")
 
+        plaintext_file: Path | None = None
+        if data.get("is_encrypted"):
+            plaintext_file = decrypt_backup_file(backup_file)
+            backup_file = plaintext_file
+
         try:
             # Extract tar.gz archive
             with tarfile.open(backup_file, "r:gz") as tar:
@@ -214,6 +231,9 @@ class RestoreService:
         except AstroMLError as e:
             logger.error(f"Model artifacts restore failed: {e}")
             return False
+        finally:
+            if plaintext_file is not None:
+                plaintext_file.unlink(missing_ok=True)
 
     def restore_full(self, backup_id: str, drop_existing_db: bool = False) -> bool:
         """Restore full backup (database + model artifacts).
