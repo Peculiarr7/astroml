@@ -1,3 +1,4 @@
+from astroml.utils.exceptions import AstroMLError
 from __future__ import annotations
 
 import logging
@@ -167,7 +168,7 @@ class ContractVerifier:
                 )
                 if not passed:
                     self._record_breach(name, contract_type, result)
-            except Exception as e:
+            except AstroMLError as e:
                 logger.error("Contract '%s' validation failed with error: %s", name, e)
                 cr = ContractResult(
                     name=name,
@@ -241,7 +242,7 @@ class ContractVerifier:
         for cb in self._failure_callbacks:
             try:
                 cb(breach)
-            except Exception as e:
+            except AstroMLError as e:
                 logger.error("Failure callback error: %s", e)
 
     @staticmethod

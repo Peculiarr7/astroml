@@ -1,3 +1,5 @@
+from typing import Any, Dict, List, Optional, Union, Callable
+from astroml.utils.exceptions import AstroMLError
 """Restore service for database and model artifacts (issue #304)."""
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ logger = logging.getLogger(__name__)
 class RestoreService:
     """Service for restoring from backups."""
 
-    def __init__(self, config: BackupConfig):
+    def __init__(self, config -> Any: BackupConfig):
         """Initialize restore service.
 
         Args:
@@ -154,7 +156,7 @@ class RestoreService:
         except subprocess.CalledProcessError as e:
             logger.error(f"Database restore command failed: {e}")
             return False
-        except Exception as e:
+        except AstroMLError as e:
             logger.error(f"Database restore failed: {e}")
             return False
 
@@ -209,7 +211,7 @@ class RestoreService:
             logger.info(f"Model artifacts restored successfully from backup: {backup_id}")
             return True
 
-        except Exception as e:
+        except AstroMLError as e:
             logger.error(f"Model artifacts restore failed: {e}")
             return False
 
@@ -310,6 +312,6 @@ class RestoreService:
         except ImportError:
             logger.warning("google-cloud-storage not installed")
             return False
-        except Exception as e:
+        except AstroMLError as e:
             logger.error(f"GCS download failed: {e}")
             return False

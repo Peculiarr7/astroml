@@ -5,6 +5,11 @@
 [![codecov](https://codecov.io/gh/Traqora/astroml/branch/main/graph/badge.svg)](https://codecov.io/gh/Traqora/astroml)
 [![Code Complexity](https://img.shields.io/badge/complexity-A-brightgreen)](https://github.com/mombu/xenon)
 
+> 🌐 **Languages:** This README is being translated under
+> [`docs/i18n/`](./docs/i18n/). Available so far:
+> [Español (partial)](./docs/i18n/es/README.es.md).
+> See [`docs/i18n/README.md`](./docs/i18n/README.md) to add a locale.
+
 ## Dynamic Graph Machine Learning Framework for the Stellar Network
 
 **AstroML** is a research-driven Python framework for building **dynamic graph machine learning models** on the Stellar Development Foundation Stellar blockchain.

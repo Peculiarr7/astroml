@@ -1,3 +1,4 @@
+from astroml.utils.exceptions import AstroMLError
 """Database session factory for AstroML.
 
 This module provides database connection management and session creation with:
@@ -54,10 +55,19 @@ class DatabaseConfig(BaseModel):
     name: str = Field(default="astroml", min_length=1, description="Database name")
     user: str = Field(default="astroml", min_length=1, description="Database user")
     password: str = Field(default="", description="Database password")
-    pool_size: int = Field(default=10, description="Connection pool size")
-    max_overflow: int = Field(default=20, description="Max overflow connections")
-    pool_timeout: int = Field(default=30, description="Pool timeout seconds")
-    pool_recycle: int = Field(default=1800, description="Pool connection recycle seconds")
+    # Issue #989 — pool sizing drives connection cost; reject values that
+    # would disable pooling or make SQLAlchemy fail late at engine creation.
+    pool_size: int = Field(default=10, ge=1, description="Connection pool size")
+    max_overflow: int = Field(default=20, ge=0, description="Max overflow connections")
+    pool_timeout: int = Field(default=30, ge=1, description="Pool timeout seconds")
+    pool_recycle: int = Field(
+        default=1800, ge=-1, description="Pool connection recycle seconds (-1 disables)"
+    )
+
+    @property
+    def max_connections(self) -> int:
+        """Upper bound on concurrent connections this engine may open."""
+        return self.pool_size + self.max_overflow
 
     @field_validator("host")
     @classmethod
@@ -251,10 +261,21 @@ def _enable_query_profiling_if_debug(engine: Engine) -> None:
             logger.warning("Query profiler module not available")
 
 
+@lru_cache(maxsize=1)
+def get_session_factory() -> sessionmaker[Session]:
+    """Return a cached session factory bound to the shared engine.
+
+    Issue #982 — building a ``sessionmaker`` per call is wasted work on hot
+    paths; the factory is created once and reused. Call
+    ``get_session_factory.cache_clear()`` alongside ``get_engine.cache_clear()``
+    when the engine is rebuilt.
+    """
+    return sessionmaker(bind=get_engine())
+
+
 def get_session() -> Session:
-    """Return a new SQLAlchemy session."""
-    factory = sessionmaker(bind=get_engine())
-    return factory()
+    """Return a new SQLAlchemy session from the cached factory."""
+    return get_session_factory()()
 
 
 def get_pool_stats() -> PoolStats:

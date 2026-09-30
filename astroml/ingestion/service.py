@@ -1,3 +1,4 @@
+from astroml.utils.exceptions import AstroMLError
 """Ingestion service for processing Stellar network ledgers.
 
 This module provides the core ingestion service for processing Stellar ledger data
@@ -75,7 +76,7 @@ class IngestionResult(BaseIngestionResult):
     end_time: datetime
     errors: List[str] = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> Any:
         if self.errors is None:
             self.errors = []
 
@@ -167,7 +168,7 @@ class IngestionService(Ingestor):
                     processed.append(ledger_id)
                 else:
                     skipped.append(ledger_id)
-        except Exception as e:
+        except AstroMLError as e:
             errors.append(str(e))
             logger.error(f"Ingestion error: {e}")
             self._notify_failure(e, attempted, processed)
@@ -517,12 +518,43 @@ class IngestionService(Ingestor):
         chunks that failed. A failed chunk is also reported through
         ``self.notifier`` (e.g. ``SlackIntegration(config).send_webhook``),
         matching :meth:`ingest` — see issue #993.
+
+        Correlation (issue #957): each chunk delegates to :meth:`ingest_stream`,
+        which mints a fresh correlation id whenever none is already set on entry.
+        Without a shared scope around the whole chunk loop, that means every
+        chunk of one backfill run got a *different* request_id in the logs,
+        defeating the point of #944/#950's tracing for exactly the run most in
+        need of it: a multi-million-ledger backfill spanning many chunks. This
+        method now establishes one correlation id (inherited from the caller if
+        already set, otherwise freshly generated) before the loop starts, so
+        every chunk's logs carry the same ``request_id``.
         """
         if end_ledger < start_ledger:
             raise ValueError("end_ledger must be >= start_ledger")
         if chunk_size < 1:
             raise ValueError("chunk_size must be >= 1")
 
+        inherited_correlation_id = get_correlation_id()
+        with CorrelationId(inherited_correlation_id):
+            yield from self._ingest_backfill_chunked_impl(
+                start_ledger=start_ledger,
+                end_ledger=end_ledger,
+                chunk_size=chunk_size,
+                fetch_fn=fetch_fn,
+                process_fn=process_fn,
+                batch_size=batch_size,
+            )
+
+    def _ingest_backfill_chunked_impl(
+        self,
+        start_ledger: int,
+        end_ledger: int,
+        chunk_size: int,
+        fetch_fn: Callable[[int], object] | None,
+        process_fn: Callable[[int, object], None] | None,
+        batch_size: int,
+    ) -> Generator[dict[str, Any], None, None]:
+        """Body of :meth:`ingest_backfill_chunked`, run inside its correlation-id scope."""
         current = start_ledger
         while current <= end_ledger:
             chunk_end = min(current + chunk_size - 1, end_ledger)
