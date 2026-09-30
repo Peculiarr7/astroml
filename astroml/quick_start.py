@@ -1,3 +1,4 @@
+from astroml.utils.exceptions import AstroMLError
 """Quick start module for AstroML.
 
 Provides a single entry point to wire sample data through the complete
@@ -197,7 +198,7 @@ def build_sample_graph(
     try:
         stats = validate_graph(edges, node_index)
         logger.info(f"Graph validation: {stats}")
-    except Exception as e:
+    except AstroMLError as e:
         logger.warning(f"Graph validation warning: {e}")
 
     return edges, node_index
@@ -362,7 +363,7 @@ def run_quickstart() -> int:
 
         return 0
 
-    except Exception as e:
+    except AstroMLError as e:
         logger.error(f"Quick start failed: {e}", exc_info=True)
         return 1
     finally:

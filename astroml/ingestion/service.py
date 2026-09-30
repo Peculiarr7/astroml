@@ -1,3 +1,4 @@
+from astroml.utils.exceptions import AstroMLError
 """Ingestion service for processing Stellar network ledgers.
 
 This module provides the core ingestion service for processing Stellar ledger data
@@ -134,7 +135,7 @@ class IngestionResult(BaseIngestionResult):
     end_time: datetime
     errors: List[str] = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> Any:
         if self.errors is None:
             self.errors = []
 
@@ -226,7 +227,7 @@ class IngestionService(Ingestor):
                     processed.append(ledger_id)
                 else:
                     skipped.append(ledger_id)
-        except Exception as e:
+        except AstroMLError as e:
             errors.append(str(e))
             logger.error(f"Ingestion error: {e}")
             self._notify_failure(e, attempted, processed)
@@ -590,35 +591,23 @@ class IngestionService(Ingestor):
         chunks that failed. A failed chunk is also reported through
         ``self.notifier`` (e.g. ``SlackIntegration(config).send_webhook``),
         matching :meth:`ingest` — see issue #993.
+
+        Correlation (issue #957): each chunk delegates to :meth:`ingest_stream`,
+        which mints a fresh correlation id whenever none is already set on entry.
+        Without a shared scope around the whole chunk loop, that means every
+        chunk of one backfill run got a *different* request_id in the logs,
+        defeating the point of #944/#950's tracing for exactly the run most in
+        need of it: a multi-million-ledger backfill spanning many chunks. This
+        method now establishes one correlation id (inherited from the caller if
+        already set, otherwise freshly generated) before the loop starts, so
+        every chunk's logs carry the same ``request_id``.
         """
         if end_ledger < start_ledger:
             raise ValueError("end_ledger must be >= start_ledger")
         if chunk_size < 1:
             raise ValueError("chunk_size must be >= 1")
 
-        checkpoint_mgr = None
-        if resume_from_checkpoint:
-            checkpoint_mgr = BackfillCheckpointManager(checkpoint_path)
-            last_checkpoint = checkpoint_mgr.load()
-            if last_checkpoint is not None:
-                if last_checkpoint >= end_ledger:
-                    logger.info(
-                        "Checkpoint at ledger %d already at or beyond end_ledger %d, nothing to do",
-                        last_checkpoint,
-                        end_ledger,
-                    )
-                    return
-                current = last_checkpoint + 1
-                logger.info(
-                    "Resuming from checkpoint: ledger %d (target: %d)",
-                    current,
-                    end_ledger,
-                )
-            else:
-                logger.info("No checkpoint found, starting from ledger %d", start_ledger)
-                current = start_ledger
-        else:
-            current = start_ledger
+
         while current <= end_ledger:
             chunk_end = min(current + chunk_size - 1, end_ledger)
             n_processed = 0

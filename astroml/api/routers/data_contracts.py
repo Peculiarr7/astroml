@@ -1,3 +1,4 @@
+from astroml.utils.exceptions import AstroMLError
 """Data contract API endpoints for AstroML.
 
 Provides endpoints to validate data against contracts, infer contracts from data,
@@ -143,7 +144,7 @@ async def validate_data(body: ValidateRequest) -> ValidateResponse:
 
     try:
         df = pd.DataFrame(body.data)
-    except Exception as e:
+    except AstroMLError as e:
         raise HTTPException(status_code=400, detail=f"Invalid data format: {e}")
 
     if body.schema_def is not None:
@@ -196,7 +197,7 @@ async def infer_contract(body: ValidateRequest) -> InferResponse:
 
     try:
         df = pd.DataFrame(body.data)
-    except Exception as e:
+    except AstroMLError as e:
         raise HTTPException(status_code=400, detail=f"Invalid data format: {e}")
 
     contract = SchemaContract.from_dataframe(df, name="inferred")
@@ -237,7 +238,7 @@ async def verify_pipeline(body: PipelineVerifyRequest) -> PipelineVerifyResponse
 
     try:
         df = pd.DataFrame(body.data)
-    except Exception as e:
+    except AstroMLError as e:
         raise HTTPException(status_code=400, detail=f"Invalid data format: {e}")
 
     # Build pipeline_stages format for the verifier
@@ -300,6 +301,6 @@ def _safe_serialize(value: Any) -> Any:
     try:
         if hasattr(value, "__dataclass_fields__"):
             return _serialize_result(value)
-    except Exception:
+    except AstroMLError:
         pass
     return str(value)

@@ -1,3 +1,4 @@
+from astroml.utils.exceptions import AstroMLError
 """Async streaming client for Stellar Horizon transaction events."""
 
 from __future__ import annotations
@@ -81,6 +82,11 @@ class HorizonStreamingClient:
 
     @property
     def cursor(self) -> str:
+        """Where the stream will resume, or has resumed to.
+
+        Advances as transactions arrive (see :meth:`_handle_payload`), so
+        reading it after :meth:`stop` gives the reconnect point.
+        """
         return self._cursor
 
     @property
@@ -89,12 +95,33 @@ class HorizonStreamingClient:
         return self._duplicates_skipped
 
     async def start(self, on_transaction: TransactionHandler) -> None:
+        """Begin consuming in a background task and return immediately.
+
+        Args:
+            on_transaction: Called per transaction with the parsed Horizon
+                payload. May be a coroutine function; the awaitable is awaited.
+
+        Raises:
+            RuntimeError: If a stream is already running. Call
+                :meth:`stop` first rather than starting a second consumer,
+                which would advance ``cursor`` from two places at once.
+        """
         if self._task and not self._task.done():
             raise RuntimeError("stream already running")
         self._stop_event.clear()
         self._task = asyncio.create_task(self.stream(on_transaction))
 
     async def stop(self) -> None:
+        """Ask the stream to end and wait for its task to finish.
+
+        Returns once consumption has actually stopped, so a caller can be
+        sure no handler is still running — which is what makes it safe to
+        read :attr:`cursor` immediately afterwards.
+
+        Side effects: closes the open transport, which makes
+        :meth:`_consume_stream` return, and clears the tracked task. Never
+        raises: a transport that is already dead is the outcome we wanted.
+        """
         self._stop_event.set()
         writer = self._writer
         if writer is not None:
@@ -102,15 +129,34 @@ class HorizonStreamingClient:
             try:
                 await writer.wait_closed()
             except Exception:  # pragma: no cover - transport specific
-                pass
+                self._logger.debug("Error closing Horizon stream writer", exc_info=True)
 
         if self._task is not None:
             task = self._task
             self._task = None
+            # Called from inside the stream task itself (a handler that
+            # shuts down), awaiting our own task would deadlock forever.
             if task is not asyncio.current_task():
                 await task
 
     async def stream(self, on_transaction: TransactionHandler) -> None:
+        """Reconnect loop: keep consuming until :meth:`stop` is called.
+
+        Exponential backoff restarts at ``reconnect_delay`` after a
+        connection that ended cleanly and doubles per failed attempt up to
+        ``max_reconnect_delay``, so a Horizon outage costs one retry per
+        capped interval instead of a hot loop, while a routine server-side
+        disconnect reconnects promptly.
+
+        Args:
+            on_transaction: Handler passed through to each consumption; may be
+                a coroutine function.
+
+        Note:
+            Exceptions from ``on_transaction`` propagate out of this method
+            and end the loop — a failing handler is a bug to surface, not a
+            disconnected socket to retry.
+        """
         delay = self._reconnect_delay
 
         while not self._stop_event.is_set():
@@ -122,7 +168,7 @@ class HorizonStreamingClient:
                 self._logger.warning("Horizon stream disconnected. Reconnecting in %.2fs", delay)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except AstroMLError:
                 if self._stop_event.is_set():
                     break
                 self._logger.exception("Horizon stream error. Reconnecting in %.2fs", delay)
@@ -198,7 +244,7 @@ class HorizonStreamingClient:
             try:
                 await writer.wait_closed()
             except Exception:  # pragma: no cover - transport specific
-                pass
+                self._logger.debug("Error closing Horizon stream writer", exc_info=True)
             if self._writer is writer:
                 self._writer = None
 
@@ -217,6 +263,10 @@ class HorizonStreamingClient:
             self._logger.warning("Skipping non-object transaction payload: %r", tx)
             return
 
+        # Issue #983 — advance the cursor optimistically, but roll it back if
+        # the handler fails so the reconnect resumes from the last
+        # successfully handled transaction instead of skipping this one.
+        previous_cursor = self._cursor
         paging_token = tx.get("paging_token")
         if paging_token is not None:
             token = str(paging_token)
@@ -227,9 +277,17 @@ class HorizonStreamingClient:
                 return
             self._remember(token)
 
-        result = on_transaction(tx)
-        if inspect.isawaitable(result):
-            await result
+        try:
+            result = on_transaction(tx)
+            if inspect.isawaitable(result):
+                await result
+        except BaseException:
+            self._cursor = previous_cursor
+            self._logger.warning(
+                "Transaction handler failed; cursor rolled back",
+                extra={"cursor": previous_cursor, "paging_token": paging_token},
+            )
+            raise
 
     def _already_delivered(self, token: str) -> bool:
         """Whether ``token`` was delivered within the de-duplication window."""

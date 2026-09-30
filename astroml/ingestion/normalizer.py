@@ -16,11 +16,27 @@ from astroml.db.schema import NormalizedTransaction
 from astroml.ingestion.parsers import (
     _PATH_PAYMENT_TYPES,
     _extract_amount,
-    _extract_asset,
     _extract_destination,
     _parse_datetime,
+    extract_asset_string,
     extract_path_payment_hops,
+    ledger_sequence_from_operation_id,
 )
+
+
+def _natural_key(data: dict) -> tuple[int | None, int | None]:
+    """Return ``(ledger_sequence, operation_id)`` for a raw operation payload.
+
+    Horizon's operation id is a toid, so the ledger is recovered from it rather
+    than read from a separate field.  Payloads with no id yield ``(None, None)``:
+    the row is then written without a natural key instead of being keyed on a
+    guess, which keeps the ingest path working for synthetic or partial input.
+    """
+    raw_id = data.get("id")
+    if raw_id is None:
+        return (None, None)
+    operation_id = int(raw_id)
+    return (ledger_sequence_from_operation_id(operation_id), operation_id)
 
 
 def normalize_operation(data: dict) -> NormalizedTransaction:
@@ -36,20 +52,17 @@ def normalize_operation(data: dict) -> NormalizedTransaction:
     amount_str = _extract_amount(data)
     amount = float(amount_str) if amount_str is not None else None
 
-    asset_code, asset_issuer = _extract_asset(data)
-
-    if asset_code == "XLM" and asset_issuer is None:
-        normalized_asset = "XLM"
-    else:
-        normalized_asset = (
-            f"{asset_code}:{asset_issuer}" if asset_code and asset_issuer else "UNKNOWN"
-        )
+    normalized_asset = extract_asset_string(data)
 
     timestamp = _parse_datetime(data["created_at"])
     transaction_hash = data["transaction_hash"]
+    ledger_sequence, operation_id = _natural_key(data)
 
     return NormalizedTransaction(
         transaction_hash=transaction_hash,
+        ledger_sequence=ledger_sequence,
+        operation_id=operation_id,
+        hop_index=0,
         sender=sender,
         receiver=receiver,
         asset=normalized_asset,
@@ -60,6 +73,10 @@ def normalize_operation(data: dict) -> NormalizedTransaction:
 
 def normalize_path_payment_hops(data: dict) -> list[NormalizedTransaction]:
     """Return one NormalizedTransaction per hop for a path payment operation.
+
+    Every hop keeps the operation's real ``transaction_hash`` and the hop's
+    position in ``hop_index``, which together with the operation id makes each
+    hop a separate row that is still idempotent on retry.
 
     Falls back to a single record (via :func:`normalize_operation`) for
     non-path-payment types so callers can use this function uniformly.
@@ -73,10 +90,14 @@ def normalize_path_payment_hops(data: dict) -> list[NormalizedTransaction]:
 
     timestamp = _parse_datetime(data["created_at"])
     transaction_hash = data["transaction_hash"]
+    ledger_sequence, operation_id = _natural_key(data)
 
     return [
         NormalizedTransaction(
-            transaction_hash=f"{transaction_hash}_hop{hop['hop_index']}",
+            transaction_hash=transaction_hash,
+            ledger_sequence=ledger_sequence,
+            operation_id=operation_id,
+            hop_index=hop["hop_index"],
             sender=hop["from_account"],
             receiver=hop["to_account"],
             asset=hop["asset"],
@@ -100,6 +121,16 @@ def snapshot_transaction(tx: NormalizedTransaction) -> dict[str, Any]:
         Dict with the normalized fields; ``timestamp`` is ISO-8601 and
         ``amount`` is a float (or None).
     """
+    return {
+        "transaction_hash": tx.transaction_hash,
+        "sender": tx.sender,
+        "receiver": tx.receiver,
+        "asset": tx.asset,
+        "amount": float(tx.amount) if tx.amount is not None else None,
+        "timestamp": tx.timestamp.isoformat(),
+    }
+
+
 # ---------------------------------------------------------------------------
 # CLI — issue #990
 # ---------------------------------------------------------------------------
@@ -146,17 +177,6 @@ def restore_transaction(snapshot: dict[str, Any]) -> NormalizedTransaction:
 
     Args:
         snapshot: Snapshot dict containing every normalized field.
-_RECORD_FIELDS = ("transaction_hash", "sender", "receiver", "asset", "amount", "timestamp")
-
-
-def restore_record(record: dict[str, Any]) -> NormalizedTransaction:
-    """Restore a NormalizedTransaction from a CLI output record (issue #985).
-
-    Inverse of the JSON records printed by :func:`main`, so a normalized
-    snapshot written to disk can be reloaded without re-fetching Horizon.
-
-    Args:
-        record: One decoded JSON record as emitted by the CLI.
 
     Returns:
         A new, unpersisted NormalizedTransaction.
@@ -176,6 +196,24 @@ def restore_record(record: dict[str, Any]) -> NormalizedTransaction:
         amount=float(amount) if amount is not None else None,
         timestamp=datetime.fromisoformat(snapshot["timestamp"]),
     )
+
+
+_RECORD_FIELDS = ("transaction_hash", "sender", "receiver", "asset", "amount", "timestamp")
+
+
+def restore_record(record: dict[str, Any]) -> NormalizedTransaction:
+    """Restore a NormalizedTransaction from a CLI output record (issue #985).
+
+    Inverse of the JSON records printed by :func:`main`, so a normalized
+    snapshot written to disk can be reloaded without re-fetching Horizon.
+
+    Args:
+        record: One decoded JSON record as emitted by the CLI.
+
+    Returns:
+        A new, unpersisted NormalizedTransaction.
+
+    Raises:
         ValueError: if a field is missing or the timestamp is not ISO-8601.
     """
     missing = [f for f in _RECORD_FIELDS if f not in record]
