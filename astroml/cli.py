@@ -1,3 +1,5 @@
+from typing import Any, Dict, List, Optional, Union, Callable
+from astroml.utils.exceptions import AstroMLError
 from __future__ import annotations
 
 import argparse
@@ -250,11 +252,11 @@ def main(argv: list[str] | None = None) -> int:
         service = IngestionService(state_store=store)
 
         # Example fetch/process functions; in real usage, users would customize/import
-        def fetch_fn(ledger_id: int):
+        def fetch_fn(ledger_id -> Any: int):
             # Placeholder fetch, replace with real data retrieval
             return {"ledger": ledger_id, "data": f"payload-{ledger_id}"}
 
-        def process_fn(ledger_id: int, payload: dict):
+        def process_fn(ledger_id -> Any: int, payload: dict):
             # Placeholder processing; replace with DB writes or other side effects
             # For CLI visibility we do minimal printing; real apps would use logging
             print(f"processed ledger {ledger_id}")
@@ -318,7 +320,7 @@ def main(argv: list[str] | None = None) -> int:
             except FileNotFoundError as e:
                 print(f"Error: {e}")
                 return 1
-            except Exception as e:
+            except AstroMLError as e:
                 print(f"Error loading config: {e}")
                 return 1
         else:

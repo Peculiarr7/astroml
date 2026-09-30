@@ -15,3 +15,7 @@ Dependencies:
 - stellar-sdk: Stellar Horizon API client
 - aiohttp: Async HTTP client for streaming
 """
+
+from astroml.ingestion.horizon_stream import HorizonStreamError, HorizonStreamingClient
+
+__all__ = ["HorizonStreamingClient", "HorizonStreamError"]

@@ -5,8 +5,9 @@ from __future__ import annotations
 import pathlib
 
 import pytest
+from pydantic import ValidationError
 
-from astroml.db.session import load_database_config
+from astroml.db.session import DatabaseConfig, load_database_config
 
 
 def _write(path: pathlib.Path, content: str) -> pathlib.Path:
@@ -78,3 +79,31 @@ def test_valid_config_round_trips(tmp_path: pathlib.Path) -> None:
 def test_missing_file_raises_file_not_found(tmp_path: pathlib.Path) -> None:
     with pytest.raises(FileNotFoundError):
         load_database_config(tmp_path / "does-not-exist.yaml")
+
+
+# ---------------------------------------------------------------------------
+# DatabaseConfig field validation (issue #977) — `name`/`user` previously only
+# enforced `min_length=1`, so a whitespace-only value like "   " passed
+# validation and would silently flow into a malformed connection URL instead
+# of failing the way an empty/blank `host` already does.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("field", ["name", "user"])
+def test_whitespace_only_name_or_user_is_rejected(field: str) -> None:
+    with pytest.raises(ValidationError) as exc:
+        DatabaseConfig(**{field: "   "})
+    assert "cannot be blank" in str(exc.value)
+
+
+@pytest.mark.parametrize("field", ["name", "user"])
+def test_name_or_user_is_stripped_of_surrounding_whitespace(field: str) -> None:
+    config = DatabaseConfig(**{field: "  astroml  "})
+    assert getattr(config, field) == "astroml"
+
+
+@pytest.mark.parametrize("field", ["name", "user"])
+def test_empty_string_name_or_user_is_still_rejected(field: str) -> None:
+    """Guards the pre-existing `min_length=1` behavior alongside the new check."""
+    with pytest.raises(ValidationError):
+        DatabaseConfig(**{field: ""})

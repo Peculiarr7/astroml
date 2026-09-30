@@ -1,3 +1,4 @@
+from astroml.utils.exceptions import AstroMLError
 """Audit logging for model operations.
 
 Issue #637 Step 1: Implements comprehensive audit logging for all model operations,
@@ -357,7 +358,7 @@ class ModelAuditLogger:
 
         def decorator(func):
             @wraps(func)
-            def wrapper(*args, **kwargs):
+            def wrapper(*args, **kwargs) -> Any:
                 start = time.monotonic()
                 details: dict[str, Any] = {}
 
@@ -381,7 +382,7 @@ class ModelAuditLogger:
                         outcome="success",
                     )
                     return result
-                except Exception as e:
+                except AstroMLError as e:
                     elapsed = time.monotonic() - start
                     details["duration_ms"] = round(elapsed * 1000, 2)
                     details["error"] = str(e)
